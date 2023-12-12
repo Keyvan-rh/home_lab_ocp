@@ -1,0 +1,428 @@
+- name: Prep ignition files
+  hosts: bastion
+  become: true
+  vars_files:
+    - vars.yml
+  environment:
+    KUBECONFIG:
+  tasks:
+    - name: get hostname to update hosts file
+      shell: echo $HOSTNAME
+      register: result
+      tags:
+         - build_infra
+    - set_fact:
+        actual_hostname: "{{ result.stdout }}"
+      tags:
+         - build_infra
+    - name: set hosts file 
+      template:
+        src: ./templates/hosts
+        dest: /etc/hosts
+        force: yes
+        mode: "u=rw,g=r,o=r"
+      tags:
+         - build_infra
+    - name: set resolv.conf file
+      template:
+        src: ./templates/resolv.j2
+        dest: /etc/resolv.conf
+        force: yes
+        mode: "u=rw,g=r,o=r"
+      tags:
+         - build_infra
+         - install_ocp
+    - name: Install packages
+      package:
+        name: 
+          - "{{ item }}"
+        state: present
+      loop: "{{ infra.packages }}"
+      tags:
+         - build_infra
+    - name: Configure dhcp server for pxe and static ips
+      template:
+        src: ./templates/dhcpd.j2
+        dest: /etc/dhcp/dhcpd.conf
+        force: yes
+        mode: "u=rw,g=r,o=r"
+      when: infra.dhcp_provider  == 'dhcp'
+      tags:
+         - build_infra
+         - build_dhcp
+    - name: Configure httpd to listen on 8080 
+      template:
+        src: ./templates/httpd.j2
+        dest: /etc/httpd/conf/httpd.conf
+        force: yes
+        mode: "u=rw,g=r,o=r"
+      when: infra.http_provider  == 'httpd' 
+      tags:
+         - build_infra
+    - name: Configure nginx to listen on 8080
+      template:
+        src: ./templates/nginx.j2
+        dest: /etc/nginx/nginx.conf
+        force: yes
+        mode: "u=rw,g=r,o=r"
+      when: infra.http_provider == 'nginx'
+      tags:
+         - build_infra
+    - name: Create TFTP directories for auto boot and rhcos
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: 0755
+      with_items:
+        - "/var/lib/tftpboot/pxelinux.cfg"
+        - "/var/lib/tftpboot/rhcos"
+      tags:
+         - build_infra
+    - name: setup TFTP
+      shell: "cp -a /usr/share/syslinux/* /var/lib/tftpboot"
+      tags:
+         - build_infra
+    - name: restart tftp service
+      service:
+        name: tftp
+        enabled: yes
+        state: restarted
+      tags:
+         - build_infra
+    - name: configure haproxy
+      template:
+        src: ./templates/haproxy.j2
+        dest: /etc/haproxy/haproxy.cfg
+        force: yes
+        mode: "u=rw,g=r,o=r"
+      tags:
+         - build_infra
+    - name: make sure the haproxy can bind to 6443 
+      shell:
+        cmd: setsebool -P haproxy_connect_any=1
+      tags:
+         - build_infra
+    - name: restart the haproxy
+      service:
+        name: haproxy
+        enabled: yes
+        state: restarted
+      tags:
+         - build_infra
+    - name: restart dhcp service
+      service:
+        name: dhcpd
+        enabled: yes
+        state: restarted
+      when: infra.dhcp_provider == 'dhcp'
+      tags:
+         - build_infra
+    - name: Cleanup old auto pxeboot files 
+      file:
+        path: /var/lib/tftpboot/pxelinux.cfg/{{ ( '01-' + macstart + mac + item.macend ) | replace(':','-') }}
+        state: absent
+      with_items: "{{ vms_info }}"
+      tags:
+         - build_infra 
+    - name: Setup Auto pxe boot
+      template:
+        src: ./templates/{{ item.ign }}
+        dest: /var/lib/tftpboot/pxelinux.cfg/{{ ( '01-' + macstart + mac + item.macend ) | replace(':','-') }}
+        force: yes
+        mode: "u=rx,g=rx,o=rx"
+      loop: "{{ vms_info }}"
+      tags:
+         - build_infra
+    - name: restart httpd service
+      service:
+        name: httpd
+        enabled: yes
+        state: restarted
+      when: infra.http_provider  == 'httpd'
+      tags: 
+         - build_infra
+    - name: restart nginx service
+      service:
+        name: nginx
+        enabled: yes
+        state: restarted
+      when: infra.http_provider  == 'nginx'
+      tags:
+         - build_infra
+    - name: Open up firewall ports
+      firewalld:
+        permanent: yes
+        immediate: yes
+        state: enabled
+        port: "{{ item }}"
+      loop: "{{ infra.ports }}"
+      run_once: true
+      tags:
+         - build_infra
+    - name: add tftp service to  firewalld 
+      firewalld:
+        permanent: yes
+        immediate: yes
+        state: enabled
+        service: "tftp"
+      run_once: true
+      tags:
+         - build_infra
+    - name: Cleanup left over files from previous install  
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - "/tmp/{{ clusterID }}/ocp4"
+        - "/var/www/html/ignition"
+        - "/var/www/html/install"
+        - "/tmp/openshift-*"
+        - "/root/.kube"
+        - "{{ playbook_dir }}/templates/nfs-provisioner-deployment.yaml"
+      tags:
+         - prep_install
+    - name: Create needed directories 
+      file:
+        path: "{{ item }}"
+        state: directory
+      with_items:
+        - "/root/.kube"
+        - "/tmp/{{ clusterID }}/ocp4"
+        - "/var/www/html/ignition"
+        - "/var/www/html/install"
+      tags:
+         - prep_install
+    - name: download RHCOS to localhost
+      delegate_to: localhost
+      become: false
+      get_url: url={{ rhcos_download_url }}/{{ item }} dest=/tmp/.
+      with_items: "{{ rhcos }}"
+      tags:
+        - prep_install
+    - name: Copy RHCOS to bastion server
+      copy:
+        src: "/tmp/{{item}}"
+        dest: /var/www/html/install/.
+        force: yes
+        mode: "u=rx,g=r,o=r"
+      with_items: "{{ rhcos }}"
+      tags:
+         - prep_install
+    - name: Setup install-config.yaml
+      template:
+        src: ./templates/install-config.ocp
+        dest: "/tmp/{{ clusterID }}/ocp4/install-config.yaml"
+        force: yes
+        mode: "u=rw,g=r,o=r"
+      tags:
+         - prep_install
+    - name: Cleanup client apps oc, kubctl, openshift-install
+      delegate_to: localhost
+      become: false 
+      file:
+        path: /tmp/{{ item }}
+        state: absent
+      with_items: "{{ ocp_client }}"
+      tags:
+         - prep_install
+    - name: download OCP installer
+      delegate_to: localhost
+      become: false
+      get_url: url={{ client_download_url }}/{{ item }} dest=/tmp/{{ item }}
+      with_items: "{{ ocp_client }}"
+      tags:
+        - prep_install
+    - name: Copy OCP installer to bastion server
+      copy:
+        src: "/tmp/{{item}}"
+        dest: /tmp/.
+        force: yes
+        mode: "u=rx,g=rwx,o=rwx"
+      with_items: "{{ ocp_client }}"
+      tags:
+         - prep_install
+    - name: extract and copy client apps oc, kubctl, openshift-install
+      ansible.builtin.unarchive:
+        src: /tmp/{{ item }}
+        dest: /usr/local/bin/.
+      with_items: "{{ ocp_client }}"
+      tags:
+         - prep_install
+         - testunzip
+    - name: Copy  prep-ignitions installer to bastion server
+      copy:
+        src: "{{ playbook_dir }}/prep-ignitions.sh"
+        dest: "/tmp/{{ clusterID }}/prep-ignitions.sh"
+        force: yes
+        mode: "u=rx,g=rwx,o=rwx"
+      tags:
+         - prep_install
+    - name: Create ignition files
+      shell:
+        chdir: "/tmp/{{ clusterID }}/"
+        cmd: ./prep-ignitions.sh
+      tags:
+         - prep_install
+         - test
+    - name: configure  nfs provisioner with correct nfs server info
+      template:
+        src: ./templates/OMV-nfs-provisioner-deployment.yaml
+        dest: "{{ playbook_dir }}/templates/nfs-provisioner-deployment.yaml"
+        force: yes
+        mode: "u=rw,g=r,o=r"
+      tags:
+         - install_nfs1
+         - instrall_ocp1
+
+  
+- name: Create OCP VMs and start them in sequence
+  hosts: vm-provider
+  become: true
+  vars_files:
+    - vars.yml 
+  tasks:
+    - name: Create new VMs for OCP cluster 
+      command: qm create "{{ vimidStart }}{{ item.vimid }}" --net0 virtio="{{ macstart }}{{ mac }}{{ item.macend }}",bridge=vmbr1 --name "{{ item.name }}"  --scsihw virtio-scsi-pci --scsi0 VMs:150,format=qcow2 --cores "{{ item.cpu }}" --memory "{{ item.mem }}" -cpu cputype="host"
+      loop: "{{ vms_info }}"
+      tags:
+         - install_ocp
+    - name: Start Bootstrap VM 
+      command: qm start "{{ vimidStart }}{{ vms_info[0].vimid }}" 
+      tags:
+         - install_ocp
+    - name: wait till bootstarp is ready step 1
+      shell: curl http://{{ infra.ip }}:9000 |grep controlplanemc/{{ vms_info[0].name }}
+      register: result
+      until: result.stdout.find("active_up") != -1 
+      retries: 60
+      delay: 60
+      tags:
+         - install_ocp
+    - name: wait till bootstarp is ready step 2
+      shell: curl http://{{ infra.ip }}:9000 |grep controlplaneapi/{{ vms_info[0].name }}
+      register: result
+      until: result.stdout.find("active_up") != -1
+      retries: 60
+      delay: 60
+      tags:
+         - install_ocp
+    - name: Start Masters VMs
+      command: qm start "{{ vimidStart }}{{ item.vimid }}" 
+      loop:
+        - "{{ vms_info[1] }}"
+        - "{{ vms_info[2] }}"
+        - "{{ vms_info[3] }}"
+      tags:
+         - install_ocp
+    - name: wait till master3 amc is ready step 1
+      shell: curl http://{{ infra.ip }}:9000 |grep controlplanemc/{{ vms_info[3].name }}
+      register: result
+      until: result.stdout.find("active_up") != -1
+      retries: 100
+      delay: 60
+      tags:
+         - install_ocp
+    - name: wait till master3 api is ready step 2
+      shell: curl http://{{ infra.ip }}:9000 |grep controlplaneapi/{{ vms_info[3].name }}
+      register: result
+      until: result.stdout.find("active_up") != -1
+      retries: 100
+      delay: 60
+      tags:
+         - install_ocp
+    - name: wait till master1 api is ready
+      shell: curl http://{{ infra.ip }}:9000 |grep controlplaneapi/{{ vms_info[1].name }}
+      register: result
+      until: result.stdout.find("active_up") != -1
+      retries: 100
+      delay: 60
+      tags:
+         - install_ocp
+    - name: wait till master1 emc is ready
+      shell: curl http://{{ infra.ip }}:9000 |grep controlplanemc/{{ vms_info[1].name }}
+      register: result
+      until: result.stdout.find("active_up") != -1
+      retries: 100
+      delay: 60
+      tags:
+         - install_ocp
+    - name: Stop BootStarp
+      command: qm stop "{{ vimidStart }}{{ vms_info[0].vimid }}"
+      tags:
+         - install_ocp
+    - name: Start workers VMs
+      command: qm start "{{ vimidStart }}{{ item.vimid }}" 
+      loop:
+        - "{{ vms_info[4] }}"
+        - "{{ vms_info[5] }}"
+      tags:
+         - install_ocp
+    - name: Pause for 7 minutes to build app cache
+      pause:
+        minutes: 5
+      tags:
+         - install_ocp
+- name: Copy auth and approve certs
+  hosts: bastion
+  become: true
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Copy  prep-ignitions installer to bastion server
+      copy:
+        src: "{{ playbook_dir }}/approve-certs.sh"
+        dest: "/tmp/{{ clusterID }}/approve-certs.sh"
+        force: yes
+        mode: "u=rx,g=rwx,o=rwx"
+      tags:
+         - install_ocp
+    - name: Approve certs
+      shell:
+        chdir: "/tmp/{{ clusterID }}"
+        cmd: ./approve-certs.sh
+      loop: [1,2,3,4,5,6,7,8,9]
+      loop_control:
+        pause: 120
+      tags:
+         - install_ocp
+    - name: wait for complition of installer 
+      shell:
+        chdir: "/tmp/{{ clusterID }}/ocp4"
+        cmd: openshift-install wait-for install-complete 
+      tags:
+         - install_ocp
+    - name: OCP admin password
+      shell:
+        chdir: "/tmp/{{ clusterID }}/ocp4/auth"
+        cmd: cat kubeadmin-password
+      register: kubeadmin
+      tags:
+         - install_ocp
+    - debug: var=kubeadmin.stdout_lines
+      tags:
+         - install_ocp
+    - name: Setup OCP registery with no persistent storage
+      ansible.builtin.shell:
+        chdir: "/tmp/{{ clusterID }}"
+        cmd: "{{ item }}"
+      with_items:
+        - "oc patch configs.imageregistry.operator.openshift.io/cluster --type merge -p '{\"spec\":{\"defaultRoute\":true}}'"
+        - "oc patch configs.imageregistry.operator.openshift.io cluster --type merge --patch '{\"spec\":{\"managementState\":\"Managed\"}}'"
+        - "oc patch configs.imageregistry.operator.openshift.io cluster --type merge --patch '{\"spec\":{\"storage\":{\"emptyDir\":{}}}}'"
+      environment:
+        KUBECONFIG: '/tmp/{{ clusterID }}/ocp4/auth/kubeconfig'
+      tags:
+        - install_ocp
+    - name: Setup NFS storage
+      ansible.builtin.shell:
+        chdir: "/tmp/{{ clusterID }}"
+        cmd: "{{ item }}"
+      with_items:
+        - "oc create -f templates/nfs-rbac.yaml -n default"
+        - "oc create -f templates/nfs-sc.yaml -n default"
+        - "oc create -f templates/nfs-provisioner-deployment.yaml -n default"
+        - "oc patch storageclass nfs -p '{\"metadata\": {\"annotations\": {\"storageclass.kubernetes.io/is-default-class\": \"true\"}}}'"
+      environment:
+        KUBECONFIG: '/tmp/{{ clusterID }}/ocp4/auth/kubeconfig'
+      tags:
+        - install_nfs

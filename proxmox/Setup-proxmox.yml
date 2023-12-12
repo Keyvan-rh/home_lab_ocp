@@ -1,0 +1,65 @@
+- name: Prep ignition files
+  hosts: localhost
+  become: true
+  vars_files:
+    - vars.yml
+  environment:
+    KUBECONFIG:  
+  gather_facts: True   
+  tasks:
+    - name: set resolv.conf file
+      template:
+        src: ./templates/resolv-proxmox.j2
+        dest: /etc/resolv.conf
+        force: yes
+        mode: "u=rw,g=r,o=r"
+    - name: Install needed packages
+      package:
+        name: 
+          - "{{ item }}"
+        state: present
+      loop: "{{ proxmox.packages }}"
+    - name: setup dnsmasq
+      template:
+        src: ./templates/dnsmasq-proxmox.j2
+        dest: /etc/dnsmasq.conf
+        force: yes
+        mode: "u=rw,g=r,o=r"
+    - name: restart dnsmasq service
+      service:
+        name: dnsmasq
+        enabled: yes
+        state: restarted
+    - name: Setup proxmox intenal network and port forwarding 
+      blockinfile:
+        path: /etc/network/interfaces
+        block: |
+          auto vmbr1
+          iface vmbr1 inet static
+                address {{ proxmox.subnet }}.{{ proxmox.ip }}/24
+                netmask 255.255.255.0
+                bridge-ports none
+                bridge-stp off
+                bridge-fd 0
+                post-up echo 1 > /proc/sys/net/ipv4/ip_forward
+                post-up   iptables -t nat -A POSTROUTING -s '{{ proxmox.subnet }}.0/24' -o vmbr0 -j MASQUERADE
+                post-down iptables -t nat -D POSTROUTING -s '{{ proxmox.subnet }}.0/24' -o vmbr0 -j MASQUERADE
+                post-up iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 2222 -j DNAT --to {{ proxmox.subnet }}.{{ infra.ip }}:22
+                post-down iptables -t nat -D PREROUTING -i vmbr0 -p tcp --dport 2222 -j DNAT --to {{ proxmox.subnet }}.{{ infra.ip }}:22
+                post-up iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 9000 -j DNAT --to {{ proxmox.subnet }}.{{ infra.ip }}:9000
+                post-down iptables -t nat -D PREROUTING -i vmbr0 -p tcp --dport 9000 -j DNAT --to {{ proxmox.subnet }}.{{ infra.ip }}:9000
+                post-up iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 22623 -j DNAT --to {{ proxmox.subnet }}.{{ infra.ip }}:22623
+                post-down iptables -t nat -D PREROUTING -i vmbr0 -p tcp --dport 22623 -j DNAT --to {{ proxmox.subnet }}.{{ infra.ip }}:22623
+                post-up iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 80 -j DNAT --to {{ proxmox.subnet }}.{{ infra.ip }}:80
+                post-down iptables -t nat -D PREROUTING -i vmbr0 -p tcp --dport 80 -j DNAT --to {{ proxmox.subnet }}.{{ infra.ip }}:80
+                post-up iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 6443 -j DNAT --to {{ proxmox.subnet }}.{{ infra.ip }}:6443
+                post-down iptables -t nat -D PREROUTING -i vmbr0 -p tcp --dport 6443 -j DNAT --to {{ proxmox.subnet }}.{{ infra.ip }}:6443
+                post-up iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 8080 -j DNAT --to {{ proxmox.subnet }}.{{ infra.ip }}:8080
+                post-down iptables -t nat -D PREROUTING -i vmbr0 -p tcp --dport 8080 -j DNAT --to {{ proxmox.subnet }}.{{ infra.ip }}:8080
+                post-up iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 443 -j DNAT --to {{ proxmox.subnet }}.{{ infra.ip }}:443
+                post-down iptables -t nat -D PREROUTING -i vmbr0 -p tcp --dport 443 -j DNAT --to {{ proxmox.subnet }}.{{ infra.ip }}:443
+    - name: restart network service
+      service:
+        name: networking
+        enabled: yes
+        state: restarted

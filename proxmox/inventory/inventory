@@ -1,0 +1,7 @@
+localhost ansible_connection=local 
+
+[bastion]
+192.168.1.74 ansible_port=2222
+
+[vm-provider]
+pve.keyvan.home

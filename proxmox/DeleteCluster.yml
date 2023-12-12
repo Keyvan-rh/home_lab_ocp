@@ -1,0 +1,16 @@
+- name: qmCreateVM
+  hosts: vm-provider
+  become: true
+  vars_files:
+    - vars.yml
+  tasks:
+    - name: Stop OCP cluster VMs 
+      command: qm stop "{{ vimidStart }}{{ item.vimid }}"
+      loop: "{{ vms_info }}"
+    - name: Delete OCP cluster VMs
+      command: qm destroy "{{ vimidStart }}{{ item.vimid }}"
+      loop: "{{ vms_info }}"
+      tags:
+        - delete_vms
+        
+
