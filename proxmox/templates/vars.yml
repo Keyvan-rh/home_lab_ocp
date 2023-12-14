@@ -1,11 +1,10 @@
 proxmox:
   private_ip: < full IP address of your proxmox>
   private_subnet: 192.168.100.
-  public_ip: 192.168.1.74
+  public_ip: < full IP address of your proxmox>
   public_subnet: 192.168.1.
   name: 'pve'
   packages:
-    - dnsmasq
     - python3-apt
     - net-tools
   ports:
@@ -16,7 +15,11 @@ infra:
   dns_ip: < ip of dns server 192.168.1.20>
   name: infra
   pxeboot_path: '/var/lib/tftpboot/pxelinux.cfg/'
+  dhcp_provider: dhcp    # valid values dhcp, dnsmasq
+  http_provider: nginx # valid values nginx, httpd
   packages:
+   - dhcp-server
+   - nginx
    - httpd
    - tftp-server
    - tftp
